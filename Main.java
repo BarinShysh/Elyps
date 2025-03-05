@@ -3,16 +3,20 @@ import javax.swing.event.ChangeEvent;
 import javax.swing.event.ChangeListener;
 import java.awt.*;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 // Класс, представляющий точку на эллиптической кривой
 class Point {
     private long x;
     private long y;
+    private long p; // Добавляем поле для модуля p
 
-    public Point(long x, long y) {
+    public Point(long x, long y, long p) {
         this.x = x;
         this.y = y;
+        this.p = p;
     }
 
     public long getX() {
@@ -25,7 +29,12 @@ class Point {
 
     @Override
     public String toString() {
-        return "(" + x + ", " + y + ")";
+        // Преобразуем координаты в отрицательные, если они больше p/2
+        long displayX = x;
+        long displayY = y;
+        if (x > p / 2) displayX = x - p;
+        if (y > p / 2) displayY = y - p;
+        return "(" + displayX + ", " + displayY + ")";
     }
 
     @Override
@@ -47,11 +56,13 @@ class EllipticCurve {
     private long p; // модуль поля
     private long a; // коэффициент a
     private long b; // коэффициент b
+    private List<Point> cachedGroup; // Кэшированная группа точек
 
     public EllipticCurve(long p, long a, long b) {
         this.p = p;
         this.a = a;
         this.b = b;
+        this.cachedGroup = generateGroup(); // Генерация группы при создании кривой
     }
 
     public long getP() {
@@ -103,7 +114,7 @@ class EllipticCurve {
         if (x3 < 0) x3 += p;
         if (y3 < 0) y3 += p;
 
-        return new Point(x3, y3);
+        return new Point(x3, y3, p);
     }
 
     // Вычисление кратной точки kP
@@ -135,16 +146,28 @@ class EllipticCurve {
 
     // Построение группы точек эллиптической кривой
     public List<Point> generateGroup() {
+        if (cachedGroup != null) {
+            return cachedGroup; // Возвращаем кэшированную группу
+        }
+
         List<Point> group = new ArrayList<>();
         for (long x = 0; x < p; x++) {
             long rhs = (x * x * x + a * x + b) % p; // x^3 + a*x + b mod p
             for (long y = 0; y < p; y++) {
                 if ((y * y) % p == rhs) {
-                    group.add(new Point(x, y));
+                    if (y != 0) {
+                        long negativeY = (-y) % p;
+                        if (negativeY < 0) negativeY += p;
+                        if (negativeY != y) {
+                            group.add(new Point(x, negativeY, p));
+                        }
+                    } else {
+                        group.add(new Point(x, y, p));
+                    }
                 }
             }
         }
-        group.add(null); // Добавляем точку на бесконечности
+        cachedGroup = group; // Кэшируем группу
         return group;
     }
 
@@ -154,35 +177,115 @@ class EllipticCurve {
     }
 }
 
-// Класс для рисования осей и точек
-class CurvePanel extends JPanel {
-    private List<Point> points;
+// Класс для представления группы точек
+class Group {
+    public int order = 1;
+    public List<Point> groupList = new ArrayList<>();
 
-    public CurvePanel(List<Point> points) {
-        this.points = points;
+    public Group(EllipticCurve ec, Point dot) {
+        Point infiniteDot = ec.generateGroup().get(0); // Первая точка - бесконечность
+        Point current = ec.addPoints(dot, infiniteDot);
+        current = findReference(ec, current);
+
+        groupList.add(infiniteDot);
+
+        while (current != null && !current.equals(infiniteDot)) {
+            groupList.add(current);
+            current = ec.addPoints(current, dot);
+            current = findReference(ec, current);
+            order++;
+        }
     }
 
-    public void updatePoints(List<Point> points) {
-        this.points = points;
-        repaint();
-    }
-
-    @Override
-    protected void paintComponent(Graphics g) {
-        super.paintComponent(g);
-        Graphics2D g2d = (Graphics2D) g;
-
-        // Рисуем оси
-        g2d.drawLine(50, getHeight() / 2, getWidth() - 50, getHeight() / 2); // X-axis
-        g2d.drawLine(getWidth() / 2, 50, getWidth() / 2, getHeight() - 50); // Y-axis
-
-        // Рисуем точки
-        for (Point point : points) {
-            if (point != null) {
-                int x = (int) (point.getX() * 10) + getWidth() / 2;
-                int y = getHeight() / 2 - (int) (point.getY() * 10);
-                g2d.fillOval(x - 3, y - 3, 6, 6);
+    public Point findReference(EllipticCurve ec, Point dot) {
+        for (Point member : ec.generateGroup()) {
+            if (member.equals(dot)) {
+                return member;
             }
+        }
+        return null;
+    }
+
+    public void printGroup(JTextArea textArea) {
+        int i = 1;
+        textArea.append("\n\nПорядок подгруппы: " + this.order + "\n");
+        for (Point member : groupList) {
+            textArea.append(i + " ) " + member + "\n");
+            i++;
+        }
+    }
+}
+
+// Класс для генерации подгрупп
+class SubGroups {
+    public List<Group> groups;
+    EllipticCurve ec;
+
+    public SubGroups(EllipticCurve newEc) {
+        ec = newEc;
+        generateGroups();
+    }
+
+    private void generateGroups() {
+        List<Point> points = ec.generateGroup();
+        for (Point point : points) {
+            Group group = new Group(ec, point);
+
+            if (groups == null) {
+                groups = new ArrayList<>();
+                groups.add(group);
+            } else {
+                int bestPosition = findBestPosition(group);
+                boolean exists = checkIfGroupAlreadyExists(group, bestPosition);
+
+                if (!exists) {
+                    groups.add(bestPosition, group);
+                }
+            }
+        }
+    }
+
+    private boolean checkIfGroupAlreadyExists(Group group, int position) {
+        boolean exists = false;
+        int current = position;
+
+        if (current != this.groups.size()) {
+            Set<Point> hashGroupChecker = new HashSet<>(group.groupList);
+            while (this.groups.get(current).order == group.order) {
+                if (hashGroupChecker.equals(new HashSet<>(this.groups.get(current).groupList))) {
+                    exists = true;
+                    break;
+                }
+
+                current++;
+
+                if (current == this.groups.size()) {
+                    break;
+                }
+            }
+        }
+
+        return exists;
+    }
+
+    private int findBestPosition(Group group) {
+        int bestPosition = 0;
+        for (Group current : this.groups) {
+            if (current.order >= group.order) {
+                break;
+            }
+            bestPosition++;
+        }
+
+        return bestPosition;
+    }
+
+    public void printOrderedDots(JTextArea textArea) {
+        int i = 1;
+        for (Group group : groups) {
+            textArea.append("\nПодгруппа " + i + ":\n");
+            group.printGroup(textArea);
+            i++;
         }
     }
 }
@@ -191,18 +294,17 @@ class CurvePanel extends JPanel {
 public class Main extends JFrame {
     private EllipticCurve curve;
     private JTextArea textArea;
-    private CurvePanel curvePanel;
     private JTextField xField, yField, kField;
 
     public Main() {
         // Параметры эллиптической кривой
-        long p = 17; // Простое число
+        long p = 995; // Простое число
         long a = 2;  // Коэффициент a
         long b = 2;  // Коэффициент b
 
         curve = new EllipticCurve(p, a, b);
         setTitle("Elliptic Curve Cryptography");
-        setSize(1000, 700);
+        setSize(800, 600);
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setLayout(new BorderLayout());
 
@@ -261,7 +363,7 @@ public class Main extends JFrame {
 
         // Панель для ввода точки и кратности
         JPanel inputPanel = new JPanel();
-        inputPanel.setLayout(new GridLayout(4, 2));
+        inputPanel.setLayout(new GridLayout(5, 2));
 
         JLabel xLabel = new JLabel("xP:");
         xField = new JTextField();
@@ -276,6 +378,9 @@ public class Main extends JFrame {
         JButton checkButton = new JButton("Проверить точку");
         checkButton.addActionListener(e -> checkPointOnCurve());
 
+        JButton subgroupsButton = new JButton("Показать подгруппы");
+        subgroupsButton.addActionListener(e -> showSubgroups());
+
         inputPanel.add(xLabel);
         inputPanel.add(xField);
         inputPanel.add(yLabel);
@@ -284,14 +389,11 @@ public class Main extends JFrame {
         inputPanel.add(kField);
         inputPanel.add(computeButton);
         inputPanel.add(checkButton);
-
-        // Панель для рисования осей и точек
-        curvePanel = new CurvePanel(curve.generateGroup());
+        inputPanel.add(subgroupsButton);
 
         add(panel, BorderLayout.NORTH);
-        add(scrollPane, BorderLayout.WEST);
+        add(scrollPane, BorderLayout.CENTER);
         add(inputPanel, BorderLayout.SOUTH);
-        add(curvePanel, BorderLayout.CENTER);
 
         updateCurve(p, a, b);
     }
@@ -305,7 +407,6 @@ public class Main extends JFrame {
         }
         long order = curve.calculateOrder();
         textArea.append("\nПорядок группы: " + order);
-        curvePanel.updatePoints(group);
     }
 
     private void computeMultiplePoint() {
@@ -314,7 +415,7 @@ public class Main extends JFrame {
             long yP = Long.parseLong(yField.getText());
             long k = Long.parseLong(kField.getText());
 
-            Point P = new Point(xP, yP);
+            Point P = new Point(xP, yP, curve.getP());
             Point kP = curve.multiplyPoint(P, k);
             textArea.append("\n\nТочка " + k + "P: " + kP);
         } catch (NumberFormatException e) {
@@ -327,7 +428,7 @@ public class Main extends JFrame {
             long xP = Long.parseLong(xField.getText());
             long yP = Long.parseLong(yField.getText());
 
-            Point P = new Point(xP, yP);
+            Point P = new Point(xP, yP, curve.getP());
             if (curve.isPointOnCurve(P)) {
                 textArea.append("\n\nТочка " + P + " лежит на кривой.");
             } else {
@@ -336,6 +437,11 @@ public class Main extends JFrame {
         } catch (NumberFormatException e) {
             JOptionPane.showMessageDialog(this, "Некорректный ввод!", "Ошибка", JOptionPane.ERROR_MESSAGE);
         }
+    }
+
+    private void showSubgroups() {
+        SubGroups subGroups = new SubGroups(curve);
+        subGroups.printOrderedDots(textArea);
     }
 
     public static void main(String[] args) {
